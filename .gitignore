@@ -1,0 +1,17 @@
+# 忽略权重模型文件和整个模型文件夹
+model/epoch_241.pth
+pretrained_ckpt/cswin_tiny_224.pth
+# 或者直接忽略所有 .pth 文件
+*.pth
+
+# 忽略数据集文件夹
+data/
+Synapse/
+
+# 忽略本地的 python 轮子包 (.whl)
+*.whl
+
+# 忽略一些常见的缓存和输出文件夹（可选，建议加上）
+__pycache__/
+output_acdc_100/
+output_acdc_test/
