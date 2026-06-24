@@ -1,22 +1,29 @@
 import os
+import io
 import torch
 import numpy as np
-import gradio as gr
+import base64
 from PIL import Image
 from torchvision import transforms
+from fastapi import FastAPI, UploadFile, File, Form
+from fastapi.responses import JSONResponse
+from fastapi.middleware.cors import CORSMiddleware
+import uvicorn
+from fastapi.responses import JSONResponse, FileResponse # 这里新增了 FileResponse
+from typing import List
 
-# 导入 MMRSG-UNet 专属网络和配置 (基于你项目里的 test.py 写法)
+# 导入您的网络和配置
 from networks.vision_transformer import MMRSGUNet as ViT_seg
 from config import get_config
 
 # ==========================================
-# 1. 模拟命令行参数 (为了无需命令行传参直接运行网页)
+# 1. 初始化配置与模型 (保留您原本的逻辑)
 # ==========================================
 class MockArgs:
     dataset = 'Synapse'
     img_size = 224
     num_classes = 9
-    cfg = 'configs/cswin_tiny_224_lite.yaml'  # 根据你实际的配置文件修改
+    cfg = 'configs/cswin_tiny_224_lite.yaml'
     opts = None
     zip = False
     cache_mode = 'part'
@@ -27,124 +34,186 @@ class MockArgs:
     tag = None
     eval = False
     throughput = False
-    
-    # --- 新增的属性，防止 config.py 报错 ---
-    batch_size = 1       # 推理时 batch_size 设为 1 即可
+    batch_size = 1
     base_lr = 0.0001
     max_epochs = 250
-    output_dir = './'    # 防止找不到输出目录报错
+    output_dir = './'
     list_dir = './lists/lists_Synapse'
     volume_path = '../data/Synapse'
 
 args = MockArgs()
 config = get_config(args)
-
-# ==========================================
-# 2. 初始化并加载 MMRSG-UNet 模型
-# ==========================================
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 model = ViT_seg(config, img_size=args.img_size, num_classes=args.num_classes).to(device)
 
-# 填入你提供的权重绝对路径
 model_path = '/home/chuanhaoyang/proiect_pratice_of_cnn/MMRSG-UNet-main/model/epoch_241.pth'
 checkpoint = torch.load(model_path, map_location=device)
 
-# --- 核心修复：处理版本迭代导致的网络层改名问题 ---
 new_state_dict = {}
 for k, v in checkpoint.items():
-    # 1. 修复最外层网络改名: cswin_unet -> mmrsg_unet
-    new_key = k.replace('cswin_unet.', 'mmrsg_unet.')
-    
-    # 2. 修复内部模块改名: MSCA -> msdc
-    new_key = new_key.replace('MSCA', 'msdc')
-    
+    new_key = k.replace('cswin_unet.', 'mmrsg_unet.').replace('MSCA', 'msdc')
     new_state_dict[new_key] = v
 
-# 使用修复后的字典加载权重
-# strict=False 允许忽略掉原来模型里有，但现在代码里已经被删掉的冗余层 (如 conv33conv33conv11)
 model.load_state_dict(new_state_dict, strict=False)
-model.eval() # 设置为推理模式
+model.eval()
 
-# ==========================================
-# 3. 图像预处理与色彩映射表
-# ==========================================
 transform = transforms.Compose([
     transforms.Resize((args.img_size, args.img_size)),
     transforms.ToTensor()
 ])
 
-# 定义 Synapse 数据集 9 个类别的渲染颜色 (RGB格式)
-# 0是背景(黑), 1-8是各种器官颜色
+# 类别名称与颜色映射
+CLASS_NAMES = ["背景", "主动脉", "胆囊", "左肾", "右肾", "肝脏", "胰腺", "脾脏", "胃"]
 COLORS = np.array([
-    [0, 0, 0],         # Background: 黑
-    [255, 0, 0],       # Class 1: 红
-    [0, 255, 0],       # Class 2: 绿
-    [0, 0, 255],       # Class 3: 蓝
-    [255, 255, 0],     # Class 4: 黄
-    [255, 0, 255],     # Class 5: 洋红
-    [0, 255, 255],     # Class 6: 青色
-    [255, 128, 0],     # Class 7: 橙色
-    [128, 0, 128],     # Class 8: 紫色
+    [0, 0, 0], [255, 0, 0], [0, 255, 0], [0, 0, 255], [255, 255, 0], 
+    [255, 0, 255], [0, 255, 255], [255, 128, 0], [128, 0, 128],
 ], dtype=np.uint8)
 
 # ==========================================
-# 4. 核心推理与后处理函数
+# 2. FastAPI 服务构建
 # ==========================================
-def predict(image):
+app = FastAPI(title="MMRSG-UNet Medical API")
+
+# 允许跨域请求（方便前端调用）
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+# ==========================================
+# 新增：让根目录直接返回我们的前端 HTML 网页
+# ==========================================
+@app.get("/")
+async def serve_frontend():
+    # 确保您的 index.html 和 app.py 放在同一个目录下
+    return FileResponse("index.html")
+
+@app.post("/predict")
+async def predict_api(files: List[UploadFile] = File(...), alpha: float = Form(0.4)):
     try:
-        if image is None:
-            return None
-            
-        # 1. 容错处理与通道转换
-        if isinstance(image, str):
-            image = Image.open(image)
-        if isinstance(image, np.ndarray):
-            image = Image.fromarray(image.astype('uint8'))
-        if hasattr(image, 'mode') and image.mode != 'RGB':
-            image = image.convert('RGB')
-            
-        original_size = image.size # 记录原图大小以便复原
+        images = []
+        original_sizes = []
+        
+        # 1. 异步读取所有上传的图片
+        for file in files:
+            image_bytes = await file.read()
+            image = Image.open(io.BytesIO(image_bytes))
+            if image.mode != 'RGB':
+                image = image.convert('RGB')
+            images.append(image)
+            original_sizes.append(image.size)
 
-        # 2. 推理计算
-        img_tensor = transform(image).unsqueeze(0).to(device)
+        if not images:
+            return JSONResponse(content={"status": "error", "message": "未接收到图片"}, status_code=400)
+
+        # 2. 将多张图片堆叠成一个 Batch Tensor (B, C, H, W)
+        tensor_list = [transform(img) for img in images]
+        batch_tensor = torch.stack(tensor_list).to(device)
+
+        # 3. 批量推理 (GPU 并行加速)
         with torch.no_grad():
-            output = model(img_tensor)
-            # mmrsg_unet 的 forward 函数返回了一个列表 [p1, p2, p3, p4]
-            # p1 是最终的上采样输出结果
-            pred = output[0] if isinstance(output, list) else output
-            
-            # 在 Channel 维度(dim=1)上取 argmax 获取每个像素所属的类别索引
-            pred_mask = torch.argmax(pred, dim=1).squeeze(0).cpu().numpy()
+            output = model(batch_tensor)
+            # 输出形状应为 [B, num_classes, H, W]
+            preds = output[0] if isinstance(output, list) else output
+            # 批量获取类别索引，形状 [B, H, W]
+            pred_masks = torch.argmax(preds, dim=1).cpu().numpy()
 
-        # 3. 后处理：将数字索引 (0~8) 映射为实际的 RGB 颜色图片
-        color_mask = COLORS[pred_mask]
-        mask_image = Image.fromarray(color_mask)
-        
-        # 将 Mask 放大回用户上传图片的长宽比例
-        mask_image = mask_image.resize(original_size, Image.NEAREST)
+        # 4. 批量后处理与数据封装
+        results = []
+        for b in range(len(images)):
+            pred_mask = pred_masks[b]
+            original_size = original_sizes[b]
+            filename = files[b].filename
 
-        # 将原图与 Mask 半透明叠加 (alpha=0.4表示透明度)，方便直观查看器官位置
-        blend_image = Image.blend(image, mask_image, alpha=0.4)
+            # 计算量化指标
+            total_pixels = pred_mask.shape[0] * pred_mask.shape[1]
+            metrics = []
+            for i in range(1, args.num_classes):
+                pixel_count = np.sum(pred_mask == i)
+                if pixel_count > 0:
+                    percentage = (pixel_count / total_pixels) * 100
+                    metrics.append({
+                        "organ": CLASS_NAMES[i],
+                        "pixel_count": int(pixel_count),
+                        "percentage": f"{percentage:.2f}%"
+                    })
 
-        return blend_image
-        
+            # 图像后处理与半透明叠加
+            color_mask = COLORS[pred_mask]
+            mask_image = Image.fromarray(color_mask).resize(original_size, Image.NEAREST)
+            blend_image = Image.blend(images[b], mask_image, alpha=alpha)
+
+            # 转换为 Base64
+            buffered = io.BytesIO()
+            blend_image.save(buffered, format="PNG")
+            img_str = base64.b64encode(buffered.getvalue()).decode("utf-8")
+
+            results.append({
+                "filename": filename,
+                "image_base64": f"data:image/png;base64,{img_str}",
+                "metrics": metrics
+            })
+
+        return JSONResponse(content={
+            "status": "success",
+            "results": results
+        })
+
     except Exception as e:
         import traceback
         traceback.print_exc()
-        # 万一报错，返回纯黑图片或者抛出错误方便调试
-        return image
+        return JSONResponse(content={"status": "error", "message": str(e)}, status_code=500)
+    
+async def predict_api(file: UploadFile = File(...), alpha: float = Form(0.4)):
+    try:
+        # 1. 读取并预处理图像
+        image_bytes = await file.read()
+        image = Image.open(io.BytesIO(image_bytes))
+        if image.mode != 'RGB':
+            image = image.convert('RGB')
+        original_size = image.size
 
-# ==========================================
-# 5. 启动 Gradio 网页
-# ==========================================
-interface = gr.Interface(
-    fn=predict,                                       
-    inputs=gr.Image(type="pil", label="上传医学扫描图片 (如 MRI/CT)"),  
-    outputs=gr.Image(type="pil", label="AI 器官分割结果"), 
-    title="MMRSG-UNet 医疗图像分割平台",
-    description="上传您的扫描图像，模型将自动分割出病灶及不同的器官组织。模型权重使用: epoch_241.pth"
-)
+        # 2. 模型推理
+        img_tensor = transform(image).unsqueeze(0).to(device)
+        with torch.no_grad():
+            output = model(img_tensor)
+            pred = output[0] if isinstance(output, list) else output
+            pred_mask = torch.argmax(pred, dim=1).squeeze(0).cpu().numpy()
+
+        # 3. 计算量化指标 (各个器官的像素面积占比)
+        total_pixels = pred_mask.shape[0] * pred_mask.shape[1]
+        metrics = []
+        for i in range(1, args.num_classes): # 跳过背景(0)
+            pixel_count = np.sum(pred_mask == i)
+            if pixel_count > 0:
+                percentage = (pixel_count / total_pixels) * 100
+                metrics.append({
+                    "organ": CLASS_NAMES[i],
+                    "pixel_count": int(pixel_count),
+                    "percentage": f"{percentage:.2f}%"
+                })
+
+        # 4. 图像后处理与叠加
+        color_mask = COLORS[pred_mask]
+        mask_image = Image.fromarray(color_mask).resize(original_size, Image.NEAREST)
+        blend_image = Image.blend(image, mask_image, alpha=alpha)
+
+        # 5. 转换为 Base64 以供前端渲染
+        buffered = io.BytesIO()
+        blend_image.save(buffered, format="PNG")
+        img_str = base64.b64encode(buffered.getvalue()).decode("utf-8")
+
+        return JSONResponse(content={
+            "status": "success",
+            "image_base64": f"data:image/png;base64,{img_str}",
+            "metrics": metrics
+        })
+
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return JSONResponse(content={"status": "error", "message": str(e)}, status_code=500)
 
 if __name__ == "__main__":
-    # share=True 可以让你生成一个外网可访问的公共链接
-    interface.launch(share=True, server_name="0.0.0.0", server_port=7860)
+    uvicorn.run(app, host="0.0.0.0", port=8000)
