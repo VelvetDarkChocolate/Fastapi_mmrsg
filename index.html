@@ -1,0 +1,304 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>MMRSG-UNet 医疗影像智能分析终端</title>
+    <style>
+        :root {
+            --bg-color: #0f172a;
+            --panel-bg: #1e293b;
+            --text-main: #f8fafc;
+            --text-muted: #94a3b8;
+            --accent: #3b82f6;
+            --accent-hover: #2563eb;
+            --border: #334155;
+        }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Arial, sans-serif;
+            background-color: var(--bg-color);
+            color: var(--text-main);
+            margin: 0;
+            padding: 20px;
+            display: flex;
+            flex-direction: column;
+            height: 100vh;
+            box-sizing: border-box;
+        }
+        .header {
+            padding-bottom: 20px;
+            border-bottom: 1px solid var(--border);
+            margin-bottom: 20px;
+        }
+        .header h1 {
+            margin: 0;
+            font-size: 24px;
+            font-weight: 600;
+            letter-spacing: 1px;
+        }
+        .header p {
+            margin: 5px 0 0 0;
+            color: var(--text-muted);
+            font-size: 14px;
+        }
+        .main-container {
+            display: flex;
+            gap: 20px;
+            flex: 1;
+            overflow: hidden;
+        }
+        .control-panel {
+            width: 300px;
+            background: var(--panel-bg);
+            padding: 20px;
+            border-radius: 8px;
+            border: 1px solid var(--border);
+            display: flex;
+            flex-direction: column;
+            gap: 20px;
+            overflow-y: auto;
+        }
+        .view-panel {
+            flex: 1;
+            background: var(--panel-bg);
+            border-radius: 8px;
+            border: 1px solid var(--border);
+            display: flex;
+            flex-direction: column;
+            padding: 20px;
+            overflow-y: auto;
+            position: relative;
+            align-items: stretch;
+            justify-content: flex-start;
+        }
+        .upload-area {
+            border: 2px dashed var(--border);
+            border-radius: 8px;
+            padding: 30px 20px;
+            text-align: center;
+            cursor: pointer;
+            transition: all 0.3s;
+        }
+        .upload-area:hover {
+            border-color: var(--accent);
+            background: rgba(59, 130, 246, 0.05);
+        }
+        input[type="file"] {
+            display: none;
+        }
+        button {
+            background: var(--accent);
+            color: white;
+            border: none;
+            padding: 12px;
+            border-radius: 6px;
+            font-size: 16px;
+            font-weight: bold;
+            cursor: pointer;
+            transition: background 0.3s;
+        }
+        button:hover {
+            background: var(--accent-hover);
+        }
+        button:disabled {
+            background: var(--border);
+            cursor: not-allowed;
+        }
+        .slider-container {
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+        }
+        input[type="range"] {
+            width: 100%;
+            cursor: pointer;
+        }
+        .metrics-table {
+            width: 100%;
+            border-collapse: collapse;
+            margin-top: 10px;
+            font-size: 14px;
+        }
+        .metrics-table th, .metrics-table td {
+            text-align: left;
+            padding: 10px;
+            border-bottom: 1px solid var(--border);
+        }
+        .metrics-table th {
+            color: var(--text-muted);
+            font-weight: 500;
+        }
+        #gallery {
+            display: flex;
+            flex-direction: column;
+            gap: 20px;
+            width: 100%;
+        }
+        .gallery-item {
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            padding: 15px;
+            background: #000; /* 卡片背景也改為深黑色以襯托 MRI/CT */
+            text-align: center; /* 讓標題也置中 */
+        }
+        .gallery-title {
+            color: var(--text-muted);
+            margin-bottom: 8px;
+            font-size: 14px;
+        }
+        .gallery-img {
+            width: 100%;
+            max-height: 65vh; /* 限制最大高度為視窗高度的 65%，避免圖片無限放大 */
+            height: auto;
+            border-radius: 4px;
+            object-fit: contain; /* 確保圖片按比例縮放且不變形 */
+            background-color: #000; /* 加上純黑底色，更符合醫療影像軟體的看圖習慣 */
+            display: block;
+            margin: 0 auto; /* 讓圖片在容器內水平置中 */
+        }
+        .loading {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: rgba(15, 23, 42, 0.8);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 18px;
+            color: var(--accent);
+            display: none;
+            z-index: 10;
+        }
+    </style>
+</head>
+<body>
+
+    <div class="header">
+        <h1>MMRSG-UNet Medical AI Workstation</h1>
+        <p>多尺度 Mamba 与逆向语义门控医疗影像分割终端 v1.0</p>
+    </div>
+
+    <div class="main-container">
+        <div class="control-panel">
+            <label class="upload-area" id="drop-zone">
+                <div id="upload-text">点击或拖拽上传影像<br>(MRI/CT 切片)</div>
+                <input type="file" id="file-input" accept="image/*" multiple>
+            </label>
+            
+            <div class="slider-container">
+                <label for="alpha-slider">蒙版透明度: <span id="alpha-val">0.4</span></label>
+                <input type="range" id="alpha-slider" min="0.1" max="1.0" step="0.1" value="0.4">
+            </div>
+
+            <button id="submit-btn" disabled>开始智能分割</button>
+
+            <div>
+                <h3 style="margin-bottom: 10px; font-size: 16px; color: var(--text-muted);">自动量化分析</h3>
+                <table class="metrics-table" id="metrics-table">
+                    <thead>
+                        <tr>
+                            <th>检出组织</th>
+                            <th>像素占比</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <tr><td colspan="2" style="text-align:center; color:var(--text-muted);">暂无数据</td></tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+
+        <div class="view-panel">
+            <div id="gallery"></div>
+            <div class="loading" id="loading-mask">AI 正在深度解析批处理序列，请稍候...</div>
+        </div>
+    </div>
+
+    <script>
+        const fileInput = document.getElementById('file-input');
+        const uploadText = document.getElementById('upload-text');
+        const submitBtn = document.getElementById('submit-btn');
+        const gallery = document.getElementById('gallery');
+        const loadingMask = document.getElementById('loading-mask');
+        const alphaSlider = document.getElementById('alpha-slider');
+        const alphaVal = document.getElementById('alpha-val');
+        const metricsTableBody = document.querySelector('#metrics-table tbody');
+
+        let currentFiles = [];
+
+        fileInput.addEventListener('change', (e) => {
+            if (e.target.files.length > 0) {
+                currentFiles = Array.from(e.target.files);
+                uploadText.innerHTML = `<span style="color:var(--accent)">已选择 ${currentFiles.length} 张切片</span>`;
+                submitBtn.disabled = false;
+                
+                gallery.innerHTML = '';
+                metricsTableBody.innerHTML = '<tr><td colspan="2" style="text-align:center; color:var(--text-muted);">等待分析...</td></tr>';
+            }
+        });
+
+        alphaSlider.addEventListener('input', (e) => {
+            alphaVal.textContent = e.target.value;
+        });
+
+        submitBtn.addEventListener('click', async () => {
+            if (currentFiles.length === 0) return;
+
+            const formData = new FormData();
+            currentFiles.forEach(file => {
+                formData.append('files', file);
+            });
+            formData.append('alpha', alphaSlider.value);
+
+            loadingMask.style.display = 'flex';
+            submitBtn.disabled = true;
+            gallery.innerHTML = '';
+            metricsTableBody.innerHTML = '';
+
+            try {
+                // 如果使用后端渲染页面，相对路径 '/predict' 即可
+                const response = await fetch('/predict', {
+                    method: 'POST',
+                    body: formData
+                });
+
+                const data = await response.json();
+                
+                if (data.status === 'success') {
+                    data.results.forEach((result) => {
+                        const imgContainer = document.createElement('div');
+                        imgContainer.className = 'gallery-item';
+                        imgContainer.innerHTML = `
+                            <div class="gallery-title">切片: ${result.filename}</div>
+                            <img class="gallery-img" src="${result.image_base64}" alt="Result">
+                        `;
+                        gallery.appendChild(imgContainer);
+
+                        if (result.metrics && result.metrics.length > 0) {
+                            const separator = `<tr><td colspan="2" style="background:var(--bg-color); color:var(--accent); font-size:12px; font-weight:bold; text-align:center;">--- ${result.filename} ---</td></tr>`;
+                            metricsTableBody.innerHTML += separator;
+                            result.metrics.forEach(item => {
+                                const row = `<tr>
+                                    <td>${item.organ}</td>
+                                    <td><span style="color:var(--text-main); font-weight:bold;">${item.percentage}</span></td>
+                                </tr>`;
+                                metricsTableBody.innerHTML += row;
+                            });
+                        }
+                    });
+                } else {
+                    alert('分析失败: ' + data.message);
+                }
+            } catch (error) {
+                console.error(error);
+                alert('网络请求失败，请确保后端服务已启动。');
+            } finally {
+                loadingMask.style.display = 'none';
+                submitBtn.disabled = false;
+            }
+        });
+    </script>
+</body>
+</html>
