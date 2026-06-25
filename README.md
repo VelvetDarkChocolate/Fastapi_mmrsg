@@ -5,7 +5,7 @@
 This is the official PyTorch implementation for the paper "**MMRSG-UNet: Integrating Multi-scale Mamba and Reverse Semantic Gating for Medical Image Segmentation**". 
 
 This repository serves as the central hub for our code, data, and models.
-<img width="2532" height="1202" alt="image" src="https://github.com/user-attachments/assets/2058d115-aae0-4c7f-8c53-893b6ab64aaf" />
+<img width="2532" height="1202" alt="image" src="./屏幕截图 2026-06-25 150652.png" />
 
 
 ## 📢 News & Updates
