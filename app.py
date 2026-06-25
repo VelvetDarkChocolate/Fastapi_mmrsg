@@ -11,6 +11,7 @@ from fastapi.middleware.cors import CORSMiddleware
 import uvicorn
 from fastapi.responses import JSONResponse, FileResponse # 这里新增了 FileResponse
 from typing import List
+from fastapi import FastAPI, UploadFile, File, Form
 
 # 导入您的网络和配置
 from networks.vision_transformer import MMRSGUNet as ViT_seg
@@ -90,8 +91,20 @@ async def serve_frontend():
     return FileResponse("index.html")
 
 @app.post("/predict")
-async def predict_api(files: List[UploadFile] = File(...), alpha: float = Form(0.4)):
+async def predict_api(
+    files: List[UploadFile] = File(...), 
+    alpha: float = Form(0.4),
+    model_preset: str = Form("abdomen"),     # 👈 新增：接收模型部位
+    inference_mode: str = Form("accurate")   # 👈 新增：接收推理精度
+):
     try:
+        # 🔥 在后台终端打印前端传过来的设置，你可以借此确认前后端已经打通！
+        print(f"==== 🚀 收到推理任务 ====")
+        print(f"预设部位: [{model_preset}]")
+        print(f"推理模式: [{inference_mode}]")
+        print(f"切片数量: {len(files)} 张")
+        print(f"===========================")
+
         images = []
         original_sizes = []
         
@@ -112,12 +125,19 @@ async def predict_api(files: List[UploadFile] = File(...), alpha: float = Form(0
         batch_tensor = torch.stack(tensor_list).to(device)
 
         # 3. 批量推理 (GPU 并行加速)
-        with torch.no_grad():
-            output = model(batch_tensor)
-            # 输出形状应为 [B, num_classes, H, W]
-            preds = output[0] if isinstance(output, list) else output
-            # 批量获取类别索引，形状 [B, H, W]
-            pred_masks = torch.argmax(preds, dim=1).cpu().numpy()
+        # 💡 这里可以根据前端传来的 inference_mode 决定是否开启半精度加速
+        if inference_mode == "fast":
+            with torch.autocast(device_type='cuda', dtype=torch.float16):
+                with torch.no_grad():
+                    output = model(batch_tensor)
+        else:
+            with torch.no_grad():
+                output = model(batch_tensor)
+
+        # 输出形状应为 [B, num_classes, H, W]
+        preds = output[0] if isinstance(output, list) else output
+        # 批量获取类别索引，形状 [B, H, W]
+        pred_masks = torch.argmax(preds, dim=1).cpu().numpy()
 
         # 4. 批量后处理与数据封装
         results = []
